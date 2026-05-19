@@ -1,0 +1,26 @@
+# repo-janitor configuration file
+# Place this file in your project root as .repo-janitor.toml
+
+[general]
+# Minimum severity level to report (critical, high, medium, low)
+min_severity = "low"
+
+# Categories to analyze (security, quality)
+categories = ["security", "quality"]
+
+# Disable LLM analysis
+no_llm = false
+
+[output]
+# Output file for security audit report
+report_file = "SECURITY_AUDIT.md"
+
+# JSON output for CI/CD
+json_output = false
+
+[llm]
+# NVIDIA NIM API base URL
+base_url = "https://integrate.api.nvidia.com/v1"
+
+# Model to use
+model = "meta/llama-3.1-70b-instruct"
