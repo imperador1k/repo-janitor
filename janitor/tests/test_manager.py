@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import shutil
 
-from janitor.manager import BackupManager, DiffManager, RollbackManager, CodeModifier
+from janitor.legacy.manager import BackupManager, DiffManager, RollbackManager, CodeModifier
 
 
 class TestBackupManager:

@@ -22,8 +22,10 @@ from janitor.language_detector import LanguageDetector
 from janitor.analyzer import Finding, RiskLevel
 from janitor.analyzers import ANALYZER_REGISTRY, get_analyzer
 from janitor.llm import LLMClient
-from janitor.manager import BackupManager, DiffManager, RollbackManager, CodeModifier
+from janitor.legacy.manager import BackupManager, DiffManager, RollbackManager, CodeModifier
 from janitor.dependency_scanner import DependencyScanner
+from janitor.outputs.html_report import generate_html_report
+from janitor.hooks import install_hook, uninstall_hook, run_pre_commit
 
 console = Console()
 
@@ -173,7 +175,9 @@ class RepoJanitor:
             lang_files = [f for f in files if analyzer.can_analyze(f)]
             if lang_files:
                 console.print(f"[dim]Analyzing {len(lang_files)} {info['display_name']} files...[/dim]")
-                for file_path in lang_files:
+                for idx, file_path in enumerate(lang_files, 1):
+                    if idx % 25 == 0 or idx == len(lang_files):
+                        console.print(f"[dim]  [{idx}/{len(lang_files)}] {file_path.name}[/dim]")
                     self._analyze_file(file_path, analyzer)
                 total_files_analyzed += len(lang_files)
 
@@ -586,8 +590,13 @@ Examples:
   repo-janitor . --min-severity high       # Only high/critical issues
   repo-janitor . --category security       # Only security issues
   repo-janitor . --json                    # JSON output for CI/CD
+  repo-janitor . --json                    # JSON output for CI/CD
+  repo-janitor . --html                    # Interactive HTML report
+  repo-janitor . --html report.html        # Custom HTML report filename
+  repo-janitor --install-hooks             # Install pre-commit hook
+  repo-janitor --uninstall-hooks           # Remove pre-commit hook
   repo-janitor . -v                        # Verbose output
-  repo-janitor . --min-lang-threshold 5    # Only audit languages > 5%
+  repo-janitor . --min-lang-threshold 5    # Only audit languages > 5
         """
     )
 
@@ -670,7 +679,7 @@ Examples:
         '--min-lang-threshold',
         type=float,
         default=config.get('general', {}).get('min_language_threshold', 1.0),
-        help='Minimum language percentage threshold to audit (default: 1.0%)'
+        help='Minimum language percentage threshold to audit (default: 1.0)'
     )
 
     parser.add_argument(
@@ -686,6 +695,33 @@ Examples:
         help='Output file for security audit report'
     )
 
+    parser.add_argument(
+        '--html',
+        nargs='?',
+        const='security_report.html',
+        default=None,
+        metavar='FILE',
+        help='Generate interactive HTML report (optional filename, default: security_report.html)'
+    )
+
+    parser.add_argument(
+        '--install-hooks',
+        action='store_true',
+        help='Install repo-janitor pre-commit hook'
+    )
+
+    parser.add_argument(
+        '--uninstall-hooks',
+        action='store_true',
+        help='Uninstall repo-janitor pre-commit hook'
+    )
+
+    parser.add_argument(
+        '--pre-commit',
+        action='store_true',
+        help='Run in pre-commit mode (reads staged file list from stdin)'
+    )
+
     args = parser.parse_args()
 
     if args.verbose:
@@ -697,6 +733,32 @@ Examples:
         cache.clear()
         console.print("[green]LLM cache cleared[/green]")
         return 0
+
+    if args.install_hooks:
+        root = Path(args.path).resolve()
+        if install_hook(root):
+            console.print(f"[green]Pre-commit hook installed[/green] at [cyan]{root / '.git' / 'hooks' / 'pre-commit'}[/cyan]")
+        else:
+            console.print("[yellow]Hook installation failed — check if .git/hooks exists and no hook already present[/yellow]")
+        return 0
+
+    if args.uninstall_hooks:
+        root = Path(args.path).resolve()
+        if uninstall_hook(root):
+            console.print("[green]Pre-commit hook removed[/green]")
+        else:
+            console.print("[yellow]No pre-commit hook found to remove[/yellow]")
+        return 0
+
+    if args.pre_commit:
+        import sys as _sys
+        files = [f.strip() for f in _sys.stdin.read().strip().split('\n') if f.strip()]
+        if not files:
+            print(json.dumps({"files_checked": 0, "findings": [], "total_issues": 0, "critical": 0, "high": 0, "medium": 0, "low": 0}))
+            return 0
+        result = run_pre_commit(files, args.min_severity)
+        print(json.dumps(result, indent=2))
+        return 0 if result['critical'] == 0 and result['high'] == 0 else 1
 
     janitor = RepoJanitor(
         root_path=args.path,
@@ -715,6 +777,10 @@ Examples:
     result = janitor.run()
     janitor.print_results(result)
     janitor.generate_security_audit_report(args.output)
+
+    if args.html is not None:
+        html_path = generate_html_report(result, args.html)
+        console.print(f"[green]HTML report generated:[/green] [cyan]{html_path}[/cyan]")
 
     return 0 if result['critical'] == 0 else 1
 

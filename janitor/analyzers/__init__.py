@@ -42,6 +42,11 @@ from janitor.analyzers.java import JavaAnalyzer
 from janitor.analyzers.go import GoAnalyzer
 from janitor.analyzers.csharp import CSharpAnalyzer
 from janitor.analyzers.php import PHPAnalyzer
+from janitor.analyzers.rust import RustAnalyzer
+from janitor.analyzers.ruby import RubyAnalyzer
+from janitor.analyzers.c_cpp import CppAnalyzer
+from janitor.analyzers.dart import DartAnalyzer
+from janitor.analyzers.swift import SwiftAnalyzer
 
 ANALYZER_REGISTRY["python"] = PythonAnalyzer
 ANALYZER_REGISTRY["javascript"] = JavaScriptAnalyzer
@@ -51,3 +56,8 @@ ANALYZER_REGISTRY["java"] = JavaAnalyzer
 ANALYZER_REGISTRY["go"] = GoAnalyzer
 ANALYZER_REGISTRY["csharp"] = CSharpAnalyzer
 ANALYZER_REGISTRY["php"] = PHPAnalyzer
+ANALYZER_REGISTRY["rust"] = RustAnalyzer
+ANALYZER_REGISTRY["ruby"] = RubyAnalyzer
+ANALYZER_REGISTRY["c_cpp"] = CppAnalyzer
+ANALYZER_REGISTRY["dart"] = DartAnalyzer
+ANALYZER_REGISTRY["swift"] = SwiftAnalyzer

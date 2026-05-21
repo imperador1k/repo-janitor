@@ -61,6 +61,9 @@ class TypeScriptAnalyzer(BaseAnalyzer):
         result.metadata["frameworks"] = detected_frameworks
 
         for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if not stripped or stripped.startswith('//') or stripped.startswith('/*') or stripped.startswith('*') or stripped.startswith('import '):
+                continue
             for check in self.checks:
                 if check.pattern.search(line):
                     if self._passes_context_checks(check, line, content, detected_frameworks):

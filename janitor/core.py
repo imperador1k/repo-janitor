@@ -1,19 +1,18 @@
 """Core module exports for repo-janitor."""
 
 from janitor.scanner import Scanner
-from janitor.analyzer import PythonAnalyzer, Finding, RiskLevel, PythonAnalysisResult
-from janitor.js_analyzer import JSAnalyzer, JSAnalysisResult
+from janitor.analyzers.python import PythonAnalyzer
+from janitor.analyzers.javascript import JavaScriptAnalyzer
+from janitor.types import Finding, RiskLevel
 from janitor.llm import LLMClient, LLMResponse, LLMCache
-from janitor.manager import BackupManager, DiffManager, RollbackManager, CodeModifier
+from janitor.legacy.manager import BackupManager, DiffManager, RollbackManager, CodeModifier
 
 __all__ = [
     'Scanner',
     'PythonAnalyzer',
-    'JSAnalyzer',
+    'JavaScriptAnalyzer',
     'Finding',
     'RiskLevel',
-    'PythonAnalysisResult',
-    'JSAnalysisResult',
     'LLMClient',
     'LLMResponse',
     'LLMCache',

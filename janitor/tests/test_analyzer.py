@@ -4,7 +4,8 @@ import pytest
 from pathlib import Path
 import tempfile
 
-from janitor.analyzer import PythonAnalyzer, Finding, RiskLevel
+from janitor.analyzers.python import PythonAnalyzer
+from janitor.types import Finding, RiskLevel
 
 
 class TestPythonAnalyzer:
