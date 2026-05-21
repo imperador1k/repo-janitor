@@ -9,12 +9,25 @@ from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
-HOOK_SCRIPT = r"""#!/usr/bin/env python3
+HOOK_SCRIPT = r"""#!/usr/bin/env python
 """ + '"' + r"""repo-janitor pre-commit hook - blocks commits with critical/high issues.""" + '"' + r"""
 
 import subprocess, sys, json, os
 
 SUPPORTED = ('.py','.js','.ts','.jsx','.tsx','.kt','.java','.go','.rs','.cs','.php','.rb','.cpp','.c','.cc','.cxx','.h','.hpp','.hxx','.dart','.swift')
+
+def _find_python():
+    for cmd in [sys.executable, 'python', 'python3', 'py -3']:
+        if not cmd:
+            continue
+        try:
+            parts = cmd.split() if ' ' in cmd else [cmd]
+            r = subprocess.run(parts + ['--version'], capture_output=True, text=True)
+            if r.returncode == 0:
+                return cmd
+        except FileNotFoundError:
+            continue
+    return None
 
 def main():
     try:
@@ -38,11 +51,15 @@ def main():
     if not to_scan:
         sys.exit(0)
 
+    python = _find_python()
+    if not python:
+        print("repo-janitor: Python not found. Install Python or use 'git commit --no-verify'")
+        sys.exit(1)
+
     input_data = "\n".join(to_scan)
-    proc = subprocess.run(
-        [sys.executable, "-m", "janitor.cli", "--pre-commit", "--min-severity", "critical", "--no-llm", "--json"],
-        input=input_data, capture_output=True, text=True, cwd=os.getcwd()
-    )
+    cmd = python.split() if ' ' in python else [python]
+    cmd += ["-m", "janitor.cli", "--pre-commit", "--min-severity", "critical", "--no-llm", "--json"]
+    proc = subprocess.run(cmd, input=input_data, capture_output=True, text=True, cwd=os.getcwd())
 
     if proc.returncode != 0:
         print()
@@ -90,6 +107,14 @@ def install_hook(project_root: Path) -> bool:
 
     hook_path.write_text(HOOK_SCRIPT, encoding="utf-8")
     hook_path.chmod(0o755)
+
+    if sys.platform == "win32":
+        bat_path = hooks_dir / "pre-commit.bat"
+        python_path = sys.executable
+        bat_content = f'@"{python_path}" "%~dp0pre-commit" %*\n'
+        bat_path.write_text(bat_content, encoding="utf-8")
+        logger.info("Windows .bat wrapper created at %s", bat_path)
+
     logger.info("Pre-commit hook installed at %s", hook_path)
     return True
 
@@ -97,12 +122,22 @@ def install_hook(project_root: Path) -> bool:
 def uninstall_hook(project_root: Path) -> bool:
     """Remove the pre-commit hook. Returns True on success."""
     hook_path = project_root / ".git" / "hooks" / "pre-commit"
-    if not hook_path.exists():
+    removed = False
+
+    if hook_path.exists():
+        hook_path.unlink()
+        logger.info("Pre-commit hook removed from %s", hook_path)
+        removed = True
+
+    if sys.platform == "win32":
+        bat_path = project_root / ".git" / "hooks" / "pre-commit.bat"
+        if bat_path.exists():
+            bat_path.unlink()
+            logger.info("Windows .bat wrapper removed from %s", bat_path)
+
+    if not removed:
         logger.warning("No pre-commit hook found at %s", hook_path)
         return False
-
-    hook_path.unlink()
-    logger.info("Pre-commit hook removed from %s", hook_path)
     return True
 
 
