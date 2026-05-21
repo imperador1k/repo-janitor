@@ -87,10 +87,21 @@ class JSAnalyzer:
         for i, line in enumerate(lines, 1):
             for pattern, issue_type, message, risk_level in self.SECURITY_PATTERNS:
                 if re.search(pattern, line):
+                    if issue_type == 'dom_xss' and self._is_false_positive_innerhtml(line):
+                        continue
                     self._add_finding(result, i, 0, issue_type,
                                     message, risk_level,
                                     code_snippet=line.strip())
                     break
+
+    def _is_false_positive_innerhtml(self, line: str) -> bool:
+        """Check if innerHTML usage is a false positive."""
+        stripped = line.strip()
+        if re.search(r'innerHTML\s*=\s*["\x27]\s*["\x27]', stripped):
+            return True
+        if re.search(r'innerHTML\s*=\s*["\x27][^"\x27]*["\x27]\s*[;]', stripped):
+            return True
+        return False
 
     def _check_typescript_patterns(self, content, result):
         """Check for TypeScript-specific issues."""

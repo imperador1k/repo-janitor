@@ -18,10 +18,12 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.text import Text
 
 from janitor.scanner import Scanner
-from janitor.analyzer import PythonAnalyzer, Finding, RiskLevel
-from janitor.js_analyzer import JSAnalyzer
+from janitor.language_detector import LanguageDetector
+from janitor.analyzer import Finding, RiskLevel
+from janitor.analyzers import ANALYZER_REGISTRY, get_analyzer
 from janitor.llm import LLMClient
 from janitor.manager import BackupManager, DiffManager, RollbackManager, CodeModifier
+from janitor.dependency_scanner import DependencyScanner
 
 console = Console()
 
@@ -46,7 +48,8 @@ class RepoJanitor:
                  apply_changes: bool = False, use_llm: bool = True,
                  min_severity: str = "low", categories: Optional[List[str]] = None,
                  output_json: bool = False, model: Optional[str] = None,
-                 use_cache: bool = True):
+                 use_cache: bool = True, min_language_threshold: float = 1.0,
+                 scan_dependencies: bool = False):
         self.root_path = Path(root_path).resolve()
         self.dry_run = dry_run
         self.apply_changes = apply_changes
@@ -54,10 +57,11 @@ class RepoJanitor:
         self.min_severity = min_severity
         self.categories = categories or []
         self.output_json = output_json
+        self.min_language_threshold = min_language_threshold
+        self.scan_dependencies = scan_dependencies
 
         self.scanner = Scanner(str(self.root_path))
-        self.python_analyzer = PythonAnalyzer()
-        self.js_analyzer = JSAnalyzer()
+        self.language_detector = LanguageDetector(str(self.root_path), min_threshold=min_language_threshold)
         self.backup_manager = BackupManager()
         self.diff_manager = DiffManager()
         self.rollback_manager = RollbackManager(self.backup_manager)
@@ -73,8 +77,13 @@ class RepoJanitor:
 
         self.findings: List[Dict[str, Any]] = []
         self.diffs: List[Dict[str, Any]] = []
+        self.language_distribution: Dict[str, float] = {}
 
     SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+
+    def _sort_findings_by_severity(self, findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Sort findings by severity: critical > high > medium > low."""
+        return sorted(findings, key=lambda f: self.SEVERITY_ORDER.get(f.get('risk_level', 'low'), 3))
 
     def _passes_filters(self, finding: Dict[str, Any]) -> bool:
         """Check if a finding passes the severity and category filters."""
@@ -99,6 +108,29 @@ class RepoJanitor:
 
         return True
 
+    def _detect_languages(self) -> Dict[str, float]:
+        """Detect languages in the codebase and return distribution."""
+        self.language_distribution = self.language_detector.detect()
+        return self.language_distribution
+
+    def _get_analyzers_for_languages(self) -> Dict[str, Any]:
+        """Get analyzer instances for detected languages above threshold."""
+        dominant_languages = self.language_detector.get_dominant_languages(self.min_language_threshold)
+        analyzers = {}
+
+        for lang, percentage in dominant_languages:
+            analyzer_cls = get_analyzer(lang)
+            if analyzer_cls:
+                analyzers[lang] = {
+                    "analyzer": analyzer_cls(),
+                    "percentage": percentage,
+                    "display_name": self.language_detector.get_display_name(lang),
+                }
+            else:
+                logger.warning(f"No analyzer available for {lang} ({percentage:.1f}%)")
+
+        return analyzers
+
     def run(self) -> Dict[str, Any]:
         """Executa a auditoria completa."""
         if self.output_json:
@@ -111,32 +143,95 @@ class RepoJanitor:
             border_style="blue"
         ))
 
+        console.print("[dim]Detecting languages...[/dim]")
+        lang_dist = self._detect_languages()
+
+        if lang_dist:
+            lang_table = Table(title="Language Distribution", border_style="blue")
+            lang_table.add_column("Language", style="cyan")
+            lang_table.add_column("Percentage", style="bold white")
+            for lang, pct in sorted(lang_dist.items(), key=lambda x: x[1], reverse=True):
+                display_name = self.language_detector.get_display_name(lang)
+                lang_table.add_row(display_name, f"{pct:.1f}%")
+            console.print(lang_table)
+        else:
+            console.print("[yellow]No supported languages detected[/yellow]")
+
         console.print("[dim]Scanning files...[/dim]")
         files = list(self.scanner.scan())
         console.print(f"[dim]Found {len(files)} files[/dim]")
 
-        python_files = [f for f in files if f.suffix == '.py']
-        js_files = [f for f in files if f.suffix in ('.js', '.ts', '.jsx', '.tsx')]
+        analyzers = self._get_analyzers_for_languages()
 
-        console.print(f"[dim]Analyzing {len(python_files)} Python files...[/dim]")
-        for file_path in python_files:
-            self._analyze_python_file(file_path)
+        if not analyzers:
+            console.print("[yellow]No analyzers available for detected languages[/yellow]")
+            return self._build_result(files, [], [])
 
-        if js_files:
-            console.print(f"[dim]Analyzing {len(js_files)} JS/TS files...[/dim]")
-            for file_path in js_files:
-                self._analyze_js_file(file_path)
+        total_files_analyzed = 0
+        for lang, info in analyzers.items():
+            analyzer = info["analyzer"]
+            lang_files = [f for f in files if analyzer.can_analyze(f)]
+            if lang_files:
+                console.print(f"[dim]Analyzing {len(lang_files)} {info['display_name']} files...[/dim]")
+                for file_path in lang_files:
+                    self._analyze_file(file_path, analyzer)
+                total_files_analyzed += len(lang_files)
 
-        filtered_findings = [f for f in self.findings if self._passes_filters(f)]
+        filtered_findings = self._sort_findings_by_severity([f for f in self.findings if self._passes_filters(f)])
 
-        result = {
+        result = self._build_result(files, lang_files, filtered_findings)
+        result['language_distribution'] = lang_dist
+        result['languages_analyzed'] = list(analyzers.keys())
+        result['total_files_analyzed'] = total_files_analyzed
+
+        # Dependency vulnerability scan
+        if self.scan_dependencies:
+            console.print("[dim]Scanning dependencies for known vulnerabilities...[/dim]")
+            dep_scanner = DependencyScanner(self.root_path)
+            dep_findings, dep_stats = dep_scanner.scan()
+            # Add dep findings to the global list and result
+            for f in dep_findings:
+                self.findings.append({
+                    'file': f.file,
+                    'line': f.line,
+                    'column': f.column,
+                    'issue_type': f.issue_type,
+                    'message': f.message,
+                    'risk_level': f.risk_level.value,
+                    'code_snippet': f.code_snippet,
+                    'suggestion': f.suggestion,
+                })
+            result['dependency_scan'] = dep_stats
+            result['dependency_findings'] = len(dep_findings)
+
+            if dep_stats['vulnerabilities_found']:
+                console.print(f"[bold red]Found {dep_stats['vulnerabilities_found']} dependency vulnerabilities[/bold red]")
+            else:
+                console.print("[green]No dependency vulnerabilities found[/green]")
+
+            # Re-filter findings with deps included
+            all_filtered = self._sort_findings_by_severity([f for f in self.findings if self._passes_filters(f)])
+            result['findings'] = all_filtered
+            result['total_issues'] = len(all_filtered)
+            result['critical'] = sum(1 for f in all_filtered if f.get('risk_level') == 'critical')
+            result['high'] = sum(1 for f in all_filtered if f.get('risk_level') == 'high')
+            result['medium'] = sum(1 for f in all_filtered if f.get('risk_level') == 'medium')
+            result['low'] = sum(1 for f in all_filtered if f.get('risk_level') == 'low')
+
+        if self.use_llm and self._llm_client:
+            result['llm_analysis'] = self._run_llm_analysis()
+
+        return result
+
+    def _build_result(self, files, lang_files, filtered_findings) -> Dict[str, Any]:
+        """Build the result dictionary."""
+        return {
             'timestamp': datetime.now().isoformat(),
             'root_path': str(self.root_path),
             'dry_run': self.dry_run,
             'files_scanned': len(files),
-            'python_files_analyzed': len(python_files),
-            'js_files_analyzed': len(js_files),
-            'js_files_analyzed': len(js_files),
+            'python_files_analyzed': len([f for f in lang_files if f.suffix == '.py']) if lang_files else 0,
+            'js_files_analyzed': len([f for f in lang_files if f.suffix in ('.js', '.ts', '.jsx', '.tsx')]) if lang_files else 0,
             'findings': filtered_findings,
             'total_findings': len(self.findings),
             'total_issues': len(filtered_findings),
@@ -146,33 +241,33 @@ class RepoJanitor:
             'low': sum(1 for f in filtered_findings if f.get('risk_level') == 'low'),
         }
 
-        if self.use_llm and self._llm_client:
-            result['llm_analysis'] = self._run_llm_analysis()
-
-        return result
-
     def _run_json(self) -> Dict[str, Any]:
         """Run in JSON mode (no rich output)."""
         files = list(self.scanner.scan())
-        python_files = [f for f in files if f.suffix == '.py']
-        js_files = [f for f in files if f.suffix in ('.js', '.ts', '.jsx', '.tsx')]
+        lang_dist = self._detect_languages()
+        analyzers = self._get_analyzers_for_languages()
 
-        for file_path in python_files:
-            self._analyze_python_file(file_path)
+        total_files_analyzed = 0
+        all_lang_files = []
+        for lang, info in analyzers.items():
+            analyzer = info["analyzer"]
+            lang_files = [f for f in files if analyzer.can_analyze(f)]
+            if lang_files:
+                for file_path in lang_files:
+                    self._analyze_file(file_path, analyzer)
+                total_files_analyzed += len(lang_files)
+                all_lang_files.extend(lang_files)
 
-        for file_path in js_files:
-            self._analyze_js_file(file_path)
-
-        filtered_findings = [f for f in self.findings if self._passes_filters(f)]
+        filtered_findings = self._sort_findings_by_severity([f for f in self.findings if self._passes_filters(f)])
 
         result = {
             'timestamp': datetime.now().isoformat(),
             'root_path': str(self.root_path),
             'dry_run': self.dry_run,
             'files_scanned': len(files),
-            'python_files_analyzed': len(python_files),
-            'js_files_analyzed': len(js_files),
-            'js_files_analyzed': len(js_files),
+            'language_distribution': lang_dist,
+            'languages_analyzed': list(analyzers.keys()),
+            'total_files_analyzed': total_files_analyzed,
             'findings': filtered_findings,
             'total_issues': len(filtered_findings),
             'critical': sum(1 for f in filtered_findings if f.get('risk_level') == 'critical'),
@@ -181,38 +276,36 @@ class RepoJanitor:
             'low': sum(1 for f in filtered_findings if f.get('risk_level') == 'low'),
         }
 
+        if self.scan_dependencies:
+            dep_scanner = DependencyScanner(self.root_path)
+            dep_findings, dep_stats = dep_scanner.scan()
+            for f in dep_findings:
+                self.findings.append({
+                    'file': f.file, 'line': f.line, 'column': f.column,
+                    'issue_type': f.issue_type, 'message': f.message,
+                    'risk_level': f.risk_level.value, 'code_snippet': f.code_snippet,
+                    'suggestion': f.suggestion,
+                })
+            result['dependency_scan'] = dep_stats
+            result['dependency_findings'] = len(dep_findings)
+            # Re-filter
+            all_filtered = self._sort_findings_by_severity([f for f in self.findings if self._passes_filters(f)])
+            result['findings'] = all_filtered
+            result['total_issues'] = len(all_filtered)
+            result['critical'] = sum(1 for f in all_filtered if f.get('risk_level') == 'critical')
+            result['high'] = sum(1 for f in all_filtered if f.get('risk_level') == 'high')
+            result['medium'] = sum(1 for f in all_filtered if f.get('risk_level') == 'medium')
+            result['low'] = sum(1 for f in all_filtered if f.get('risk_level') == 'low')
+
         if self.use_llm and self._llm_client:
             result['llm_analysis'] = self._run_llm_analysis()
 
         return result
 
-    def _analyze_js_file(self, file_path: Path) -> None:
-        """Analyze a JS/TS file."""
+    def _analyze_file(self, file_path: Path, analyzer) -> None:
+        """Analyze a file using the given analyzer."""
         try:
-            result = self.js_analyzer.analyze_file(file_path)
-
-            for finding in result.findings:
-                self.findings.append({
-                    'file': str(file_path.relative_to(self.root_path)),
-                    'line': finding.line,
-                    'column': finding.column,
-                    'issue_type': finding.issue_type,
-                    'message': finding.message,
-                    'risk_level': finding.risk_level.value,
-                    'code_snippet': finding.code_snippet,
-                    'suggestion': finding.suggestion,
-                })
-
-            if result.has_errors:
-                logger.warning(f"Error analyzing {file_path}: {result.error_message}")
-
-        except Exception as e:
-            logger.error(f"Error analyzing {file_path}: {e}")
-
-    def _analyze_python_file(self, file_path: Path) -> None:
-        """Analisa um ficheiro Python."""
-        try:
-            result = self.python_analyzer.analyze_file(file_path)
+            result = analyzer.analyze_file(file_path)
 
             for finding in result.findings:
                 self.findings.append({
@@ -243,7 +336,6 @@ class RepoJanitor:
             if f.suffix in ('.py', '.js', '.ts', '.jsx', '.tsx')
         ]
 
-        # Try batch analysis first
         try:
             batch_files = []
             for file_path in files_to_analyze:
@@ -266,7 +358,6 @@ class RepoJanitor:
 
         except Exception as e:
             logger.warning(f"Batch analysis failed, falling back to individual: {e}")
-            # Fallback to individual analysis
             for file_path in files_to_analyze:
                 try:
                     with open(file_path, 'r', encoding='utf-8') as f:
@@ -344,6 +435,16 @@ class RepoJanitor:
             f"**Repository:** {self.root_path}",
             f"**Mode:** {'DRY-RUN' if self.dry_run else 'APPLY'}",
             "",
+            "## LANGUAGE DISTRIBUTION",
+            "",
+        ]
+
+        for lang, pct in sorted(self.language_distribution.items(), key=lambda x: x[1], reverse=True):
+            display_name = self.language_detector.get_display_name(lang)
+            lines.append(f"- **{display_name}:** {pct:.1f}%")
+
+        lines.extend([
+            "",
             "## SUMMARY",
             "",
             f"- **Total Issues:** {len(self.findings)}",
@@ -354,9 +455,10 @@ class RepoJanitor:
             "",
             "## FINDINGS",
             "",
-        ]
+        ])
 
-        for i, finding in enumerate(self.findings, 1):
+        sorted_findings = self._sort_findings_by_severity(self.findings)
+        for i, finding in enumerate(sorted_findings, 1):
             lines.extend([
                 f"### {i}. {finding['issue_type']}",
                 "",
@@ -400,12 +502,16 @@ class RepoJanitor:
         table.add_column("Value", style="bold white")
 
         table.add_row("Files Scanned", str(result['files_scanned']))
-        table.add_row("Python Files Analyzed", str(result['python_files_analyzed']))
+        table.add_row("Languages Analyzed", ", ".join(result.get('languages_analyzed', [])))
+        table.add_row("Total Files Analyzed", str(result.get('total_files_analyzed', 0)))
         table.add_row("Total Issues", str(result['total_issues']))
         table.add_row("Critical", f"[red]{result['critical']}[/red]")
         table.add_row("High", f"[magenta]{result['high']}[/magenta]")
         table.add_row("Medium", f"[yellow]{result['medium']}[/yellow]")
         table.add_row("Low", f"[cyan]{result['low']}[/cyan]")
+        if result.get('dependency_scan'):
+            dep = result['dependency_scan']
+            table.add_row("Dependency Vulns", f"[red]{dep['vulnerabilities_found']}[/red] ({dep['dependencies_tracked']} deps)")
 
         console.print(table)
 
@@ -471,7 +577,7 @@ def main():
     config = load_config(Path.cwd())
 
     parser = argparse.ArgumentParser(
-        description='repo-janitor: Python/Node/TypeScript repository auditor',
+        description='repo-janitor: Multi-language repository security auditor',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -481,6 +587,7 @@ Examples:
   repo-janitor . --category security       # Only security issues
   repo-janitor . --json                    # JSON output for CI/CD
   repo-janitor . -v                        # Verbose output
+  repo-janitor . --min-lang-threshold 5    # Only audit languages > 5%
         """
     )
 
@@ -553,6 +660,20 @@ Examples:
     )
 
     parser.add_argument(
+        '--deps',
+        action='store_true',
+        default=config.get('general', {}).get('scan_dependencies', False),
+        help='Scan dependencies for known CVEs via OSV.dev API'
+    )
+
+    parser.add_argument(
+        '--min-lang-threshold',
+        type=float,
+        default=config.get('general', {}).get('min_language_threshold', 1.0),
+        help='Minimum language percentage threshold to audit (default: 1.0%)'
+    )
+
+    parser.add_argument(
         '-v', '--verbose',
         action='store_true',
         help='Verbose output'
@@ -587,6 +708,8 @@ Examples:
         output_json=args.output_json,
         model=args.model,
         use_cache=not args.no_cache,
+        min_language_threshold=args.min_lang_threshold,
+        scan_dependencies=args.deps,
     )
 
     result = janitor.run()

@@ -22,8 +22,13 @@ IGNORE_EXTENSIONS: Set[str] = {
 
 SUPPORTED_EXTENSIONS: Set[str] = {
     '.py', '.js', '.ts', '.jsx', '.tsx',
+    '.kt', '.kts', '.ktm',
+    '.java', '.go', '.rs', '.cs', '.cpp', '.cxx', '.cc', '.c', '.hpp', '.h',
+    '.php', '.rb', '.swift',
     '.json', '.yaml', '.yml', '.toml', '.md',
-    '.html', '.css', '.scss', '.sql'
+    '.html', '.css', '.scss', '.sql',
+    '.sh', '.bash', '.zsh',
+    '.tf', '.tfvars', '.hcl',
 }
 
 
